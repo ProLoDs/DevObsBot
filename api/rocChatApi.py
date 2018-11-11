@@ -3,38 +3,44 @@ from tornado import gen
 from tornado.websocket import websocket_connect
 import json
 import time
-from api.messages import *
+from api.messages import CONNECT_MSG, GET_CHANNELS, LOGIN_MSG, STREAM_ROOM
 from hashlib import sha256
 from pprint import pprint
-from api.util import Channel,generateRandomId
+from api.util import Channel, generateRandomId
 
 
 class WebsocketClient(object):
-    def __init__(self, url, username, password, timeout=5):
+    def __init__(self, url, username, password, handlers={}, timeout=5):
         self.url = url
         self.username = username
         self.password = password
         self.timeout = timeout
-        self.channels = set()
-        self.handlers = {}
+        self.channels = {}
+        self.handlers = handlers
         self.ioloop = IOLoop.instance()
         self.openRequests = {}
         self.ws = None
         self.connect()
         PeriodicCallback(self.keep_alive, 20000).start()
         PeriodicCallback(self.getChannels, 10000).start()
+
+    def start(self):
         self.ioloop.start()
 
-    def addhandler(self,handler):
+    def addHandler(self, handler):
         self.handlers[handler.prefix] = handler
-    
+
+    def removeHandler(self, handler):
+        if handler.prefix in self.handlers:
+            del self.handlers[handler.prefix]
+
     @gen.coroutine
     def connect(self):
         print("trying to connect")
         try:
             self.ws = yield websocket_connect(self.url)
         except Exception as e:
-            print("connection error")
+            print("connection error", e)
         else:
             print("connected")
             self.ws.write_message(CONNECT_MSG)
@@ -44,13 +50,13 @@ class WebsocketClient(object):
     def run(self):
         while True:
             msg = yield self.ws.read_message()
-            #pprint(msg)
+            # pprint(msg)
             try:
                 data = json.loads(msg)
                 action = self.parseMessage(data)
                 if action:
                     self.ws.write_message(action)
-            except:
+            except json.JSONEncoder:
                 raise
             if msg is None:
                 print("connection closed")
@@ -62,7 +68,7 @@ class WebsocketClient(object):
             self.connect()
         else:
             pass
-            #self.ws.write_message("keep alive")
+            # self.ws.write_message("keep alive")
 
     def getChannels(self):
         reqId = generateRandomId()
@@ -70,8 +76,8 @@ class WebsocketClient(object):
         self.openRequests[reqId] = self.handleGetChannels
         if not self.channels:
             timestamp = 0
-        self.ws.write_message(GET_CHANNELS % (reqId,timestamp))
-    
+        self.ws.write_message(GET_CHANNELS % (reqId, timestamp))
+
     def parseMessage(self, data):
         if u'msg' in data:
             if data[u'msg'] == u'ping':
@@ -79,58 +85,80 @@ class WebsocketClient(object):
                 return json.dumps({u'msg': u'pong'})
             elif data[u'msg'] == u'connected':
                 reqId = generateRandomId()
-                print("logging in with id",reqId)
+                print("logging in with id", reqId)
                 self.openRequests[reqId] = self.handleLogin
                 hashedpw = sha256(self.password.encode('utf-8')).hexdigest()
-                return LOGIN_MSG % (reqId,self.username, hashedpw)
+                return LOGIN_MSG % (reqId, self.username, hashedpw)
             elif data[u'msg'] == u'result':
                 if 'id' in data:
                     if int(data['id']) in self.openRequests:
-                        self.openRequests[int(data['id'])](int(data['id']),data['result'])
+                        self.openRequests[int(data['id'])](
+                            int(data['id']), data['result'])
                     else:
-                        print("Unknown Id",data)
+                        print("Unknown Id", data)
                 else:
-                    print("Strange result",data)
+                    print("Strange result", data)
             elif data[u'msg'] == u'added':
                 print("gotten added:")
                 if data[u'collection'] == u"users":
-                    print("User:",data[u'fields'][u'username'], "joined:",data[u'id'])
+                    print("User:", data[u'fields']
+                          [u'username'], "joined:", data[u'id'])
                 else:
                     print("Added: Unknown Collection")
             elif data[u'msg'] == u'changed':
-                print("gotten changed:")
                 if data[u'collection'] == u'stream-room-messages':
-                    print("new Message")
                     for message in data[u'fields'][u'args']:
-                        self.handleMessages(message['rid'],message[u'u']['name'],message['msg'])
+                        # Remove user branch
+                        if u't' in message and message[u't'] == u"ru":
+                            # TODO removed from channel
+                            continue
+                        else:
+                            print(message)
+                        channel = self.channels[message[u'rid']]
+                        try:
+                            self.handleMessages(channel,
+                                                message[u'u'][u'name'],
+                                                message[u'msg'])
+                        except KeyError:
+                            pprint(data)
+            elif data[u'msg'] == u'ready':
+                pass  # {'msg': 'ready', 'subs': ['978628663']}
+                # looks like random message
+            elif data[u'msg'] == u'updated':
+                pass  # {'methods': ['665125788'], 'msg': 'updated'}
+                # no Idea...
             else:
                 print("Unknown msg")
                 pprint(data)
 
         else:
-            print("Totally Unknown",data)
+            print("Totally Unknown", data)
 
-
-    def handleLogin(self,reqId,data):
+    def handleLogin(self, reqId, data):
         pass
-        #pprint(data)
+        # pprint(data)
 
-    def handleGetChannels(self,reqId,data):
+    def handleGetChannels(self, reqId, data):
         for toBeRemoved in data[u'remove']:
-            pass
+            print("REMOVED")
+            pprint(data)
+
         for toBeUpdated in data[u'update']:
-            # pprint(toBeUpdated)
-            print(toBeUpdated[u'_id'],toBeUpdated[u'_updatedAt'][u'$date'])
-            c = Channel(toBeUpdated[u'_id'],int(toBeUpdated[u'_updatedAt'][u'$date']))
-            if c not in self.channels:
-                self.channels.add(c)
+            # print(toBeUpdated[u'_id'],toBeUpdated[u'_updatedAt'][u'$date'])
+            c = Channel(toBeUpdated[u'_id'], int(
+                toBeUpdated[u'_updatedAt'][u'$date']))
+            if u'fname' in toBeUpdated:
+                c.fname = toBeUpdated[u'fname']
+            if c.id not in self.channels:
+                self.channels[toBeUpdated[u'_id']] = c
                 reqId = generateRandomId()
-                # self.openRequests[reqId] = self.handleMessages
-                self.ws.write_message(STREAM_ROOM % (reqId,toBeUpdated[u'_id']))
-        #pprint(data)
-    def handleMessages(self,room,username,msg):
+                print("Joined Channel", c)
+                self.ws.write_message(STREAM_ROOM %
+                                      (reqId, toBeUpdated[u'_id']))
+        # pprint(data)
+
+    def handleMessages(self, room, username, msg):
         prefix = msg.split(" ")[0]
         if prefix in self.handlers:
-            self.handlers[prefix](room,username,msg)
-        print("Inside handleMessage",room,username,msg)
-
+            self.handlers[prefix](room, username, msg)
+        # print("Inside handleMessage",room,username,msg)
