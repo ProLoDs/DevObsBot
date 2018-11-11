@@ -16,6 +16,7 @@ class WebsocketClient(object):
         self.password = password
         self.timeout = timeout
         self.channels = set()
+        self.handlers = {}
         self.ioloop = IOLoop.instance()
         self.openRequests = {}
         self.ws = None
@@ -24,6 +25,9 @@ class WebsocketClient(object):
         PeriodicCallback(self.getChannels, 10000).start()
         self.ioloop.start()
 
+    def addhandler(self,handler):
+        self.handlers[handler.prefix] = handler
+    
     @gen.coroutine
     def connect(self):
         print("trying to connect")
@@ -87,6 +91,18 @@ class WebsocketClient(object):
                         print("Unknown Id",data)
                 else:
                     print("Strange result",data)
+            elif data[u'msg'] == u'added':
+                print("gotten added:")
+                if data[u'collection'] == u"users":
+                    print("User:",data[u'fields'][u'username'], "joined:",data[u'id'])
+                else:
+                    print("Added: Unknown Collection")
+            elif data[u'msg'] == u'changed':
+                print("gotten changed:")
+                if data[u'collection'] == u'stream-room-messages':
+                    print("new Message")
+                    for message in data[u'fields'][u'args']:
+                        self.handleMessages(message['rid'],message[u'u']['name'],message['msg'])
             else:
                 print("Unknown msg")
                 pprint(data)
@@ -109,9 +125,12 @@ class WebsocketClient(object):
             if c not in self.channels:
                 self.channels.add(c)
                 reqId = generateRandomId()
-                self.openRequests[reqId] = self.handleMessages
+                # self.openRequests[reqId] = self.handleMessages
                 self.ws.write_message(STREAM_ROOM % (reqId,toBeUpdated[u'_id']))
         #pprint(data)
-    def handleMessages(self,reqId,data):
-        print(data)
+    def handleMessages(self,room,username,msg):
+        prefix = msg.split(" ")[0]
+        if prefix in self.handlers:
+            self.handlers[prefix](room,username,msg)
+        print("Inside handleMessage",room,username,msg)
 
